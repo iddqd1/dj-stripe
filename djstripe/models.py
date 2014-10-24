@@ -1,4 +1,6 @@
-# -*- coding: utf-8 -*-
+"""
+Beging porting from django-stripe-payments
+"""
 from __future__ import unicode_literals
 import datetime
 import decimal
@@ -20,8 +22,7 @@ import stripe
 
 from . import exceptions
 from .managers import CustomerManager, ChargeManager, TransferManager
-
-from .settings import PAYMENTS_PLANS, INVOICE_FROM_EMAIL, SEND_INVOICE_RECEIPT_EMAILS
+from .settings import PAYMENTS_PLANS, INVOICE_FROM_EMAIL
 from .settings import PRORATION_POLICY, CANCELLATION_AT_PERIOD_END
 from .settings import plan_from_stripe_id
 from .settings import PY3
@@ -38,7 +39,6 @@ stripe.api_version = getattr(settings, "STRIPE_API_VERSION", "2012-11-07")
 
 if PY3:
     unicode = str
-
 
 def convert_tstamp(response, field_name=None):
     try:
@@ -153,7 +153,7 @@ class Event(StripeObject):
             "charge.refunded",
             "charge.dispute.created",
             "charge.dispute.updated",
-            "charge.dispute.closed",
+            "chagne.dispute.closed",
             "customer.created",
             "customer.updated",
             "customer.deleted",
@@ -385,19 +385,15 @@ class Customer(StripeObject):
                 at_period_end = False
             sub = self.stripe_customer.cancel_subscription(at_period_end=at_period_end)
         except stripe.InvalidRequestError as e:
-            if PY3:
-                err_msg = str(e)
-            else:
-                err_msg = e.message
             raise exceptions.SubscriptionCancellationFailure(
                 "Customer's information is not current with Stripe.\n{}".format(
-                    err_msg
+                    e.message
                 )
             )
         current_subscription.status = sub.status
         current_subscription.cancel_at_period_end = sub.cancel_at_period_end
-        current_subscription.current_period_end = convert_tstamp(sub, "current_period_end")
-        current_subscription.canceled_at = convert_tstamp(sub, "canceled_at") or timezone.now()
+        current_subscription.period_end = convert_tstamp(sub, "current_period_end")
+        current_subscription.canceled_at = timezone.now()
         current_subscription.save()
         cancelled.send(sender=self, stripe_response=sub)
         return current_subscription
@@ -456,6 +452,7 @@ class Customer(StripeObject):
         try:
             invoice = stripe.Invoice.create(customer=self.stripe_id)
             invoice.pay()
+            a=1
             return True
         except stripe.InvalidRequestError:
             return False  # There was nothing to invoice
@@ -493,8 +490,7 @@ class Customer(StripeObject):
                 )
                 sub_obj.amount = (sub.plan.amount / decimal.Decimal("100"))
                 sub_obj.status = sub.status
-                sub_obj.cancel_at_period_end = sub.cancel_at_period_end
-                sub_obj.canceled_at = convert_tstamp(sub, "canceled_at")
+                sub_obj.cancel_at_period_end = CANCELLATION_AT_PERIOD_END
                 sub_obj.start = convert_tstamp(sub.start)
                 sub_obj.quantity = sub.quantity
                 sub_obj.save()
@@ -510,12 +506,11 @@ class Customer(StripeObject):
                     ),
                     amount=(sub.plan.amount / decimal.Decimal("100")),
                     status=sub.status,
-                    cancel_at_period_end=sub.cancel_at_period_end,
-                    canceled_at=convert_tstamp(sub, "canceled_at"),
+                    cancel_at_period_end=CANCELLATION_AT_PERIOD_END,
                     start=convert_tstamp(sub.start),
                     quantity=sub.quantity
                 )
-
+            i=1
             if sub.trial_start and sub.trial_end:
                 sub_obj.trial_start = convert_tstamp(sub.trial_start)
                 sub_obj.trial_end = convert_tstamp(sub.trial_end)
@@ -542,7 +537,8 @@ class Customer(StripeObject):
         )
 
     def subscribe(self, plan, quantity=1, trial_days=None,
-                  charge_immediately=True, prorate=PRORATION_POLICY):
+                  charge_immediately=True):
+
         cu = self.stripe_customer
         """
         Trial_days corresponds to the value specified by the selected plan
@@ -555,15 +551,27 @@ class Customer(StripeObject):
             resp = cu.update_subscription(
                 plan=PAYMENTS_PLANS[plan]["stripe_plan_id"],
                 trial_end=timezone.now() + datetime.timedelta(days=trial_days),
-                prorate=prorate,
+                prorate=PRORATION_POLICY,
                 quantity=quantity
             )
         else:
             resp = cu.update_subscription(
                 plan=PAYMENTS_PLANS[plan]["stripe_plan_id"],
-                prorate=prorate,
+                prorate=PRORATION_POLICY,
                 quantity=quantity
             )
+        self.sync_current_subscription()
+        if charge_immediately:
+            self.send_invoice()
+        subscription_made.send(sender=self, plan=plan, stripe_response=resp)
+
+    def subscribe_plan(self, plan, charge_immediately=True):
+        cu = self.stripe_customer
+        resp = cu.update_subscription(
+            plan=plan.stripe_id,
+            prorate=PRORATION_POLICY,
+            quantity=1
+        )
         self.sync_current_subscription()
         if charge_immediately:
             self.send_invoice()
@@ -779,7 +787,7 @@ class Invoice(TimeStampedModel):
         if event.kind in valid_events:
             invoice_data = event.message["data"]["object"]
             stripe_invoice = stripe.Invoice.retrieve(invoice_data["id"])
-            cls.sync_from_stripe_data(stripe_invoice, send_receipt=SEND_INVOICE_RECEIPT_EMAILS)
+            cls.sync_from_stripe_data(stripe_invoice)
 
 
 class InvoiceItem(TimeStampedModel):
@@ -931,9 +939,9 @@ class Plan(StripeObject):
     def create(cls, metadata={}, **kwargs):
         """Create and then return a Plan (both in Stripe, and in our db)."""
 
-        stripe.Plan.create(
+        result = stripe.Plan.create(
             id=kwargs['stripe_id'],
-            amount=int(kwargs['amount'] * 100),
+            amount=int(kwargs['amount']) * 100,
             currency=kwargs['currency'],
             interval=kwargs['interval'],
             interval_count=kwargs.get('interval_count', None),
