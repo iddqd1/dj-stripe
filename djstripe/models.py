@@ -452,7 +452,6 @@ class Customer(StripeObject):
         try:
             invoice = stripe.Invoice.create(customer=self.stripe_id)
             invoice.pay()
-            a=1
             return True
         except stripe.InvalidRequestError:
             return False  # There was nothing to invoice
@@ -510,7 +509,6 @@ class Customer(StripeObject):
                     start=convert_tstamp(sub.start),
                     quantity=sub.quantity
                 )
-            i=1
             if sub.trial_start and sub.trial_end:
                 sub_obj.trial_start = convert_tstamp(sub.trial_start)
                 sub_obj.trial_end = convert_tstamp(sub.trial_end)
@@ -546,7 +544,7 @@ class Customer(StripeObject):
         """
         if ("trial_period_days" in PAYMENTS_PLANS[plan]):
             trial_days = PAYMENTS_PLANS[plan]["trial_period_days"]
-        
+
         if trial_days:
             resp = cu.update_subscription(
                 plan=PAYMENTS_PLANS[plan]["stripe_plan_id"],
@@ -938,7 +936,6 @@ class Plan(StripeObject):
     @classmethod
     def create(cls, metadata={}, **kwargs):
         """Create and then return a Plan (both in Stripe, and in our db)."""
-
         result = stripe.Plan.create(
             id=kwargs['stripe_id'],
             amount=int(kwargs['amount']) * 100,
@@ -988,3 +985,38 @@ class Plan(StripeObject):
     def stripe_plan(self):
         """Return the plan data from Stripe."""
         return stripe.Plan.retrieve(self.stripe_id)
+
+
+@python_2_unicode_compatible
+class Account(StripeObject):
+    user = models.OneToOneField(getattr(settings, 'DJSTRIPE_SUBSCRIBER_MODEL', settings.AUTH_USER_MODEL), null=True, related_name='stripe_account')
+    card = models.CharField(max_length=200, blank=True, null=True)
+
+    def __str__(self):
+        return self.stripe_id
+
+    @property
+    def stripe_account(self):
+        return stripe.Account.retrieve(self.stripe_id)
+
+    @classmethod
+    def get_or_create(cls, user):
+        try:
+            return Account.objects.get(user=user), False
+        except Account.DoesNotExist:
+            return cls.create(user), True
+
+    @classmethod
+    def create(cls, user):
+        stripe_account = stripe.Account.create(
+            email=user.email,
+            country=user.country,
+            display_name=user.get_full_name()
+        )
+        acc = Account.objects.create(user=user, stripe_id=stripe_account.id)
+        return acc
+
+    def update_card(self, external_account):
+        stripe_card = self.stripe_account.external_accounts.create(external_account=external_account)
+        self.card = stripe_card.id
+        return self
