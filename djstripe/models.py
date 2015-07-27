@@ -1011,7 +1011,7 @@ class Account(StripeObject):
         stripe_account = stripe.Account.create(
             email=user.email,
             country=user.country,
-            display_name=user.get_full_name()
+            managed=True
         )
         acc = Account.objects.create(user=user, stripe_id=stripe_account.id)
         return acc
